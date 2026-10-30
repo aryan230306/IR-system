@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StreamIR · Live</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--line:#262d38;--fg:#e6edf3;--mut:#8b949e;--acc:#58a6ff;--ok:#3fb950;--warn:#d29922;--hot:#f85149}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--line)}
+header h1{font-size:17px;margin:0}header .dot{width:9px;height:9px;border-radius:50%;background:var(--hot)}header .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+header small{color:var(--mut)}
+main{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;padding:16px 20px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;min-width:0}
+.card h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin:0 0 10px;font-weight:600}
+.kpis{grid-column:span 12;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:14px}
+.kpi b{display:block;font-size:24px;font-variant-numeric:tabular-nums}.kpi span{color:var(--mut);font-size:12px}
+.search{grid-column:span 7}.side{grid-column:span 5;display:flex;flex-direction:column;gap:14px}
+.feed{grid-column:span 4}.clusters{grid-column:span 4}.alerts{grid-column:span 4}
+@media(max-width:1000px){.search,.side,.feed,.clusters,.alerts{grid-column:span 12}}
+form{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+input,select,button{background:#0d1117;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font:inherit}
+input[type=text]{flex:1;min-width:180px}button{background:var(--acc);color:#04111f;border:0;font-weight:600;cursor:pointer}
+button.ghost{background:transparent;color:var(--mut);border:1px solid var(--line)}
+.hit{padding:9px 0;border-top:1px solid var(--line)}.hit:first-child{border-top:0}
+.hit .t{font-weight:600}.hit .m{color:var(--mut);font-size:12px}.hit .s{color:#c9d1d9;font-size:13px;margin-top:2px}
+mark{background:#58a6ff33;color:var(--fg);border-radius:3px;padding:0 2px}
+.chip{display:inline-block;margin:0 6px 6px 0;padding:3px 9px;border-radius:999px;background:#f8514922;color:#ff9b95;border:1px solid #f8514955;font-size:12px}
+.chip em{color:var(--mut);font-style:normal;margin-left:6px}
+.list{max-height:330px;overflow:auto}.row{padding:6px 0;border-top:1px solid var(--line);font-size:13px}.row:first-child{border-top:0}
+.row .m{color:var(--mut);font-size:11.5px}.tag{font-size:11px;padding:1px 6px;border-radius:4px;background:#30363d;color:var(--mut);margin-right:6px}
+.alert{border-left:3px solid var(--warn);padding-left:8px}.empty{color:var(--mut);font-style:italic}
+canvas{width:100%;height:60px;display:block}
+</style>
+</head>
+<body>
+<header><span class="dot" id="dot"></span><h1>StreamIR</h1><small>real-time stream information retrieval</small></header>
+<main>
+  <section class="kpis card" id="kpis"></section>
+  <section class="card search">
+    <h2>Search the live stream</h2>
+    <form id="sf">
+      <input type="text" id="q" placeholder='try: earthquake · apple chip · stock rally -bitcoin · +"interest rates"' autocomplete="off">
+      <select id="mode"><option>hybrid</option><option>bm25</option><option>dense</option></select>
+      <select id="hl"><option value="">no recency boost</option><option value="30">half-life 30s</option><option value="120" selected>half-life 2m</option><option value="600">half-life 10m</option></select>
+      <button>Search</button>
+    </form>
+    <div id="res"><span class="empty">Results update against the index as it grows. Search again to refresh.</span></div>
+  </section>
+  <div class="side">
+    <section class="card"><h2>Bursting terms (z-score, last 90s)</h2><div id="trends"><span class="empty">warming up…</span></div></section>
+    <section class="card"><h2>Ingest throughput (docs/s)</h2><canvas id="spark" width="600" height="60"></canvas></section>
+  </div>
+  <section class="card feed"><h2>Incoming stream</h2><div class="list" id="feed"></div></section>
+  <section class="card clusters"><h2>Story clusters</h2><div class="list" id="clusters"></div></section>
+  <section class="card alerts"><h2>Standing-query alerts</h2>
+    <form id="qf"><input type="text" id="nq" placeholder="register query e.g. chip +nvidia"><button>Watch</button></form>
+    <div class="list" id="alerts"><span class="empty">no alerts yet</span></div></section>
+</main>
+<script>
+const $=s=>document.querySelector(s), esc=s=>(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const hist=[];let alerts=[];
+function kpis(s){const l=s.latency_ms||{};const items=[["indexed",s.indexed],["live docs",s.index.live_docs],["docs/s",s.throughput_docs_per_s],["dupes dropped",s.duplicates_dropped],["p99 latency",l.p99+" ms"],["segments",s.index.segments],["clusters",s.active_clusters],["queue",s.queue_depth]];
+ $('#kpis').innerHTML=items.map(([k,v])=>`<div class="kpi"><b>${v}</b><span>${k}</span></div>`).join('')}
+function spark(){const c=$('#spark'),g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);if(hist.length<2)return;const m=Math.max(...hist,1);g.strokeStyle='#58a6ff';g.lineWidth=2;g.beginPath();hist.forEach((v,i)=>{const x=i/(59)*c.width,y=c.height-4-(v/m)*(c.height-8);i?g.lineTo(x,y):g.moveTo(x,y)});g.stroke()}
+function feed(ev){const d=document.createElement('div');d.className='row';d.innerHTML=`<span class="tag">${esc(ev.topic||ev.source)}</span>${esc(ev.title)}<div class="m">${esc(ev.source)} · cluster #${ev.cluster}</div>`;const f=$('#feed');f.prepend(d);while(f.children.length>60)f.lastChild.remove()}
+function trends(t){$('#trends').innerHTML=t&&t.length?t.map(x=>`<span class="chip">${esc(x.term)}<em>${x.count}× · z=${x.z}</em></span>`).join(''):'<span class="empty">no bursts detected</span>'}
+function clusters(c){$('#clusters').innerHTML=c&&c.length?c.map(x=>`<div class="row"><b>${x.size}</b> docs · ${x.sources} sources<br>${esc(x.title)}<div class="m">${x.terms.join(', ')}</div></div>`).join(''):'<span class="empty">none yet</span>'}
+function alertRow(a){const d=document.createElement('div');d.className='row alert';d.innerHTML=`<b>${esc(a.name)}</b> <span class="tag">${a.score}</span><br>${esc(a.doc.title)}<div class="m">${esc(a.doc.source)}</div>`;const el=$('#alerts');if(el.querySelector('.empty'))el.innerHTML='';el.prepend(d);while(el.children.length>40)el.lastChild.remove()}
+function connect(){const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+ ws.onopen=()=>$('#dot').classList.add('on');ws.onclose=()=>{$('#dot').classList.remove('on');setTimeout(connect,1500)};
+ ws.onmessage=e=>{const m=JSON.parse(e.data);
+  if(m.type==='hello')(m.latest||[]).reverse().forEach(feed);
+  else if(m.type==='doc')feed(m);
+  else if(m.type==='alert')alertRow(m);
+  else if(m.type==='stats'){kpis(m);hist.push(m.throughput_docs_per_s);if(hist.length>60)hist.shift();spark();trends(m.trends);clusters(m.clusters)}}}
+async function search(){const q=$('#q').value.trim();if(!q)return;const p=new URLSearchParams({q,mode:$('#mode').value,k:8,explain:true});if($('#hl').value)p.set('halflife',$('#hl').value);
+ const r=await fetch('/search?'+p);const j=await r.json();if(!r.ok){$('#res').innerHTML=`<span class="empty">${esc(j.detail)}</span>`;return}
+ const age=ts=>{const s=Math.max(0,Date.now()/1000-ts);return s<90?Math.round(s)+'s ago':Math.round(s/60)+'m ago'};
+ $('#res').innerHTML=`<div class="m" style="color:var(--mut);margin-bottom:6px">${j.hits.length} hits · ${j.took_ms} ms · ${j.total_live_docs} live docs</div>`+(j.hits.map(h=>`<div class="hit"><div class="t">${esc(h.title)}</div><div class="s">${esc(h.snippet)}</div><div class="m">${esc(h.source)} · ${age(h.ts)} · score ${h.score} · ${Object.entries(h.explain||{}).map(([k,v])=>k+':'+(v.tf!==undefined?'tf'+v.tf:'#'+v)).join(' ')}</div></div>`).join('')||'<span class="empty">no results</span>')}
+$('#sf').onsubmit=e=>{e.preventDefault();search()};
+$('#qf').onsubmit=async e=>{e.preventDefault();const q=$('#nq').value.trim();if(!q)return;await fetch('/queries',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({q,min_match:0.6,name:q})});$('#nq').value=''};
+connect();
+</script>
+</body>
+</html>
